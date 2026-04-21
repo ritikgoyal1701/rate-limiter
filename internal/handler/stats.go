@@ -4,19 +4,13 @@ import (
 	"log/slog"
 	"net/http"
 
+	"rate-limiter/internal/handler/adapter"
 	"rate-limiter/internal/limiter"
 )
 
 type StatsHandler struct {
 	limiter *limiter.Limiter
 	logger  *slog.Logger
-}
-
-type statsResponse struct {
-	UserID             string `json:"user_id"`
-	CurrentWindowCount int64  `json:"current_window_count"`
-	RemainingRequests  int64  `json:"remaining_requests"`
-	ResetTimeSeconds   int64  `json:"reset_time_seconds"`
 }
 
 func NewStatsHandler(l *limiter.Limiter, logger *slog.Logger) *StatsHandler {
@@ -45,10 +39,5 @@ func (h *StatsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, statsResponse{
-		UserID:             userID,
-		CurrentWindowCount: decision.CurrentWindowCount,
-		RemainingRequests:  decision.RemainingRequests,
-		ResetTimeSeconds:   decision.ResetTimeSeconds,
-	})
+	writeJSON(w, http.StatusOK, adapter.GetStatsResponse(userID, decision.CurrentWindowCount, decision.RemainingRequests, decision.ResetTimeSeconds))
 }

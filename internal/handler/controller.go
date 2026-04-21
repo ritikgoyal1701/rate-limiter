@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"rate-limiter/constants"
+	"rate-limiter/internal/handler/adapter"
 	"rate-limiter/internal/limiter"
 )
 
@@ -23,14 +25,6 @@ type RequestHandler struct {
 type requestInput struct {
 	UserID  string      `json:"user_id"`
 	Payload interface{} `json:"payload"`
-}
-
-type requestResponse struct {
-	Allowed            bool   `json:"allowed"`
-	Status             string `json:"status"`
-	CurrentWindowCount int64  `json:"current_window_count"`
-	RemainingRequests  int64  `json:"remaining_requests"`
-	ResetTimeSeconds   int64  `json:"reset_time_seconds"`
 }
 
 func NewRequestHandler(l *limiter.Limiter, logger *slog.Logger, metrics *Metrics) *RequestHandler {
@@ -62,33 +56,18 @@ func (h *RequestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Fail-open strategy: allow traffic when Redis is unavailable.
 		h.metrics.AllowedCount.Add(1)
 		h.logger.Error("rate limiter unavailable, failing open", "err", err, "user_id", input.UserID)
-		writeJSON(w, http.StatusOK, requestResponse{
-			Allowed: true,
-			Status:  "allowed_fail_open",
-		})
+		writeJSON(w, http.StatusOK, adapter.GetResponse(true, decision.CurrentWindowCount, decision.RemainingRequests, decision.ResetTimeSeconds, constants.AllowedFailOpen))
 		return
 	}
 
 	if !decision.Allowed {
 		h.metrics.LimitedCount.Add(1)
-		writeJSON(w, http.StatusTooManyRequests, requestResponse{
-			Allowed:            false,
-			Status:             "rate_limit_exceeded",
-			CurrentWindowCount: decision.CurrentWindowCount,
-			RemainingRequests:  decision.RemainingRequests,
-			ResetTimeSeconds:   decision.ResetTimeSeconds,
-		})
+		writeJSON(w, http.StatusTooManyRequests, adapter.GetResponse(false, decision.CurrentWindowCount, decision.RemainingRequests, decision.ResetTimeSeconds, constants.RateLimitExceeded))
 		return
 	}
 
 	h.metrics.AllowedCount.Add(1)
-	writeJSON(w, http.StatusOK, requestResponse{
-		Allowed:            true,
-		Status:             "allowed",
-		CurrentWindowCount: decision.CurrentWindowCount,
-		RemainingRequests:  decision.RemainingRequests,
-		ResetTimeSeconds:   decision.ResetTimeSeconds,
-	})
+	writeJSON(w, http.StatusOK, adapter.GetResponse(true, decision.CurrentWindowCount, decision.RemainingRequests, decision.ResetTimeSeconds, constants.Allowed))
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload interface{}) {
