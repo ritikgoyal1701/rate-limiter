@@ -18,7 +18,7 @@ import (
 
 	"rate-limiter/internal/handler"
 	"rate-limiter/internal/limiter"
-	"rate-limiter/internal/server"
+	"rate-limiter/router"
 )
 
 func main() {
