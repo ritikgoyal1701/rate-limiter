@@ -19,6 +19,7 @@ import (
 	"rate-limiter/internal/handler"
 	"rate-limiter/internal/limiter"
 	"rate-limiter/router"
+	"rate-limiter/constants"
 )
 
 func main() {
@@ -44,7 +45,7 @@ func main() {
 		logger.Error("redis ping failed at startup; service will use fail-open behavior", "err", err)
 	}
 
-	rl := limiter.New(redisClient, 5, 60*time.Second)
+	rl := limiter.New(redisClient, constants.RateLimit, constants.RateLimitWindow)
 	metrics := &handler.Metrics{}
 	requestHandler := handler.NewRequestHandler(rl, logger, metrics)
 	statsHandler := handler.NewStatsHandler(rl, logger)

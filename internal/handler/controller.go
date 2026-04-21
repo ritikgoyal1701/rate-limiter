@@ -8,6 +8,7 @@ import (
 
 	"rate-limiter/constants"
 	"rate-limiter/internal/handler/adapter"
+	"rate-limiter/internal/handler/requests"
 	"rate-limiter/internal/limiter"
 )
 
@@ -20,11 +21,6 @@ type RequestHandler struct {
 	limiter *limiter.Limiter
 	logger  *slog.Logger
 	metrics *Metrics
-}
-
-type requestInput struct {
-	UserID  string      `json:"user_id"`
-	Payload interface{} `json:"payload"`
 }
 
 func NewRequestHandler(l *limiter.Limiter, logger *slog.Logger, metrics *Metrics) *RequestHandler {
@@ -41,11 +37,12 @@ func (h *RequestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var input requestInput
+	var input requests.RequestInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
+
 	if input.UserID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id is required"})
 		return
@@ -71,7 +68,7 @@ func (h *RequestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload interface{}) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", constants.ContentType)
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
 }
