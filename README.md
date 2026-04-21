@@ -1,75 +1,138 @@
 # Rate-Limited API Service (Go + Redis)
 
-Production-oriented Go API that enforces per-user rate limits using a Redis-backed **Sliding Window Log** with an **atomic Lua script**.
+Go HTTP service that enforces per-user limits with a Redis-backed **Sliding Window Log** implemented via an **atomic Lua script**.
 
 ## Features
 
-- `POST /request` with payload acceptance and rate limiting (`5 requests / 60 seconds / user`)
-- `GET /stats?user_id=<id>` for per-user window metrics
-- Correct under high concurrency and multi-instance deployments
-- Redis is the single source of truth (no in-memory locks for limiter logic)
-- Fail-open strategy when Redis is unavailable
-- Request ID propagation and structured logging
-- Containerized setup with Docker Compose
+- `POST /request` rate-limits per `user_id` (`5 requests / 60 seconds` by default)
+- `GET /stats?user_id=<id>` returns live window usage for a user
+- Atomic Redis script (`ZSET` + Lua) for correctness under concurrency
+- Stateless app instances; Redis is the source of truth for limiter state
+- `X-Request-Id` propagation middleware (generated if absent)
+- Structured JSON logs via `slog`
+- Dockerized runtime with `docker-compose`
 
 ## Project Structure
 
 ```text
-root/
-  cmd/server/main.go
-  internal/
-    limiter/
-      limiter.go
-      script.lua
-    handler/
-      request.go
-      stats.go
-    server/
-      router.go
-  deployment/
-    Dockerfile
-  docker-compose.yml
-  go.mod
-  README.md
-  .env
+.
+├── constants/
+│   └── constant.go
+├── deployment/
+│   └── Dockerfile
+├── internal/
+│   ├── handler/
+│   │   ├── adapter/
+│   │   │   └── adapter.go
+│   │   ├── requests/
+│   │   │   └── request.go
+│   │   ├── response/
+│   │   │   ├── response.go
+│   │   │   └── stats.go
+│   │   ├── controller.go
+│   │   └── stats.go
+│   └── limiter/
+│       ├── limiter.go
+│       └── script.lua
+├── router/
+│   └── router.go
+├── docker-compose.yml
+├── go.mod
+├── main.go
+└── README.md
 ```
 
-## Run With Docker Compose
+## Configuration
+
+Environment variables (`.env`):
+
+- `APP_ADDR` (default `:8080`)
+- `REDIS_ADDR` (default `localhost:6379`, Docker compose sets it to `redis:6379`)
+- `REDIS_PASSWORD` (optional)
+- `REDIS_DB` (default `0`)
+
+Rate-limit defaults are defined in `constants/constant.go`:
+
+- limit: `5`
+- window: `60s`
+
+## Run
+
+### With Docker Compose
 
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
-Service endpoints:
+Endpoints:
 
 - API: `http://localhost:8080`
 - Redis: `localhost:6379`
 
+### Locally (without Docker)
+
+Prerequisites:
+
+- Go `1.23+`
+- Redis running and reachable via `REDIS_ADDR`
+
+```bash
+go run .
+```
+
 ## API Usage
 
-### 1) Send Request (rate-limited)
+### `POST /request`
+
+Body:
+
+```json
+{
+  "user_id": "user-123",
+  "payload": {
+    "action": "checkout",
+    "amount": 42
+  }
+}
+```
+
+Example:
 
 ```bash
 curl -i -X POST http://localhost:8080/request \
   -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user-123",
-    "payload": {"action":"checkout","amount":42}
-  }'
+  -d '{"user_id":"user-123","payload":{"action":"checkout","amount":42}}'
 ```
 
-Responses:
+Response schema:
 
-- `200 OK` when allowed
-- `429 Too Many Requests` when the per-user limit is exceeded
+```json
+{
+  "allowed": true,
+  "status": "allowed",
+  "current_window_count": 1,
+  "remaining_requests": 4,
+  "reset_time_seconds": 60
+}
+```
 
-### 2) Fetch Per-User Stats
+Status behavior:
+
+- `200 OK` when request is allowed
+- `429 Too Many Requests` when limit is exceeded (`status: "rate_limit_exceeded"`)
+- `200 OK` fail-open when Redis is unavailable (`status: "allowed_fail_open"`)
+- `400 Bad Request` for invalid JSON or missing `user_id`
+- `405 Method Not Allowed` for non-`POST`
+
+### `GET /stats?user_id=<id>`
+
+Example:
 
 ```bash
 curl -s "http://localhost:8080/stats?user_id=user-123" | jq
 ```
 
-Example response:
+Response schema:
 
 ```json
 {
@@ -80,53 +143,32 @@ Example response:
 }
 ```
 
-## Rate Limiting Design
+Status behavior:
 
-### Sliding Window Log (Redis ZSET)
+- `200 OK` on success
+- `400 Bad Request` when `user_id` query param is missing
+- `503 Service Unavailable` when Redis is unavailable
+- `405 Method Not Allowed` for non-`GET`
 
-- Key: `rate_limit:{user_id}` (implemented as `rate_limit:<user_id>`)
-- Score: request timestamp in milliseconds
-- Member: unique request ID (`timestamp-uuid`)
+## How Rate Limiting Works
 
-### Lua Script Atomic Steps
+Redis key pattern:
 
-1. Remove expired entries older than 60 seconds.
-2. Count current valid requests in the sorted set.
-3. If count < 5:
-   - Insert current request.
-   - Refresh key TTL to window size.
-   - Return allowed status and remaining quota.
-4. Else:
-   - Return denied status.
+- `rate_limit:{<user_id>}` (`{}` keeps hash tags consistent for Redis Cluster slotting)
 
-Because all operations happen inside one Lua script call (`EVALSHA` through `redis.NewScript`), logic is atomic and race-condition free across goroutines and distributed app instances.
+Lua flow (`internal/limiter/script.lua`):
 
-## Design Decisions
+1. Remove expired entries (`ZREMRANGEBYSCORE`)
+2. Count current window entries (`ZCARD`)
+3. Optionally add current request (`ZADD`) when under limit
+4. Set key expiry (`PEXPIRE`) to window length
+5. Return `allowed`, `current_window_count`, `remaining_requests`, `reset_time_seconds`
 
-- **Atomic Lua script** avoids race conditions from multi-call Redis patterns.
-- **Redis-backed state only** ensures correctness across multiple service replicas.
-- **Fail-open behavior** keeps upstream availability during Redis outages.
-- **Explicit timeouts** on HTTP server improve resilience under load.
-- **Simple clean architecture** keeps limiter, handlers, and routing concerns separate.
+This is executed atomically through `redis.NewScript(...).Run(...)`, avoiding race conditions across goroutines and multiple app instances.
 
-## Tradeoffs
+## Notes and Tradeoffs
 
-- Sliding window log is precise but stores one entry per accepted request, increasing memory usage versus token bucket/fixed window counters.
-- Fail-open prioritizes availability over strict enforcement during Redis incidents.
-- `GET /stats` is per-user (query param) rather than global aggregation to keep reads efficient and bounded.
-
-## Limitations
-
-- No authentication/authorization layer.
-- No persistent metrics backend (only in-process counters for allowed/429 totals).
-- No backpressure queue; excess traffic is rejected immediately.
-- Single Redis endpoint configuration in this example.
-
-## Future Improvements
-
-- Redis Cluster/Sentinel support with automatic failover and topology-aware clients.
-- Observability: Prometheus metrics, distributed tracing, and RED dashboards.
-- Queueing or deferred processing (instead of direct rejection) for burst smoothing.
-- Add contract tests and load tests (`k6`/`vegeta`) for throughput validation.
-
-Make sure Redis is running and `REDIS_ADDR` points to it.
+- Sliding Window Log is accurate but stores one record per accepted request.
+- Request payload is accepted but not persisted/processed by this service.
+- Stats are per-user only (no global aggregation endpoint).
+- Service logs Redis startup ping failures and still starts; `/request` is fail-open while `/stats` returns `503` if Redis is down.
