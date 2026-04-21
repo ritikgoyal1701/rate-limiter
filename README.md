@@ -129,11 +129,4 @@ Because all operations happen inside one Lua script call (`EVALSHA` through `red
 - Queueing or deferred processing (instead of direct rejection) for burst smoothing.
 - Add contract tests and load tests (`k6`/`vegeta`) for throughput validation.
 
-## Local Development (without Docker, optional)
-
-```bash
-go mod tidy
-go run ./cmd/server
-```
-
 Make sure Redis is running and `REDIS_ADDR` points to it.
